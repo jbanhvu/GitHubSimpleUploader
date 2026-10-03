@@ -1,4 +1,4 @@
-namespace GitHubSimpleUploader;
+﻿namespace GitHubSimpleUploader;
 
 public sealed class SettingsForm : Form
 {
@@ -11,6 +11,7 @@ public sealed class SettingsForm : Form
     private readonly TextBox commitMessageTextBox = new();
     private readonly TextBox cloneFolderNameTextBox = new();
     private bool isLoading;
+    private bool isAddingNew;
 
     public string? SelectedRepositoryId { get; private set; }
 
@@ -109,11 +110,14 @@ public sealed class SettingsForm : Form
         var closeButton = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK };
         var deleteButton = new Button { Text = "Delete", AutoSize = true };
         deleteButton.Click += (_, _) => DeleteSelectedRepository();
+        var newButton = new Button { Text = "New", AutoSize = true };
+        newButton.Click += (_, _) => StartNewRepository();
         var saveButton = new Button { Text = "Save/Update", AutoSize = true };
         saveButton.Click += (_, _) => SaveCurrentRepository();
 
         buttonPanel.Controls.Add(closeButton);
         buttonPanel.Controls.Add(deleteButton);
+        buttonPanel.Controls.Add(newButton);
         buttonPanel.Controls.Add(saveButton);
 
         root.Controls.Add(selectorPanel, 0, 0);
@@ -200,53 +204,120 @@ public sealed class SettingsForm : Form
         commitMessageTextBox.Text = repository.CommitMessage;
         cloneFolderNameTextBox.Text = repository.CloneFolderName;
         SelectedRepositoryId = repository.Id;
+        isAddingNew = false;
+    }
+
+    private void StartNewRepository()
+    {
+        isLoading = true;
+        try
+        {
+            repositoriesComboBox.SelectedIndex = -1;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+
+        ClearFields();
+        isAddingNew = true;
+        projectFolderTextBox.Focus();
     }
 
     private void SaveCurrentRepository()
     {
-        var projectFolder = projectFolderTextBox.Text.Trim();
+        var projectFolder = NormalizeFolderPath(projectFolderTextBox.Text);
         var repoUrl = repoUrlTextBox.Text.Trim();
 
         if (string.IsNullOrWhiteSpace(projectFolder))
         {
-            MessageBox.Show(this, "Vui long chon thu muc project local.", "Thieu thong tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Vui lòng chọn thư mục project local.", "Thiếu thông tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         if (string.IsNullOrWhiteSpace(repoUrl))
         {
-            MessageBox.Show(this, "Vui long nhap GitHub repository URL.", "Thieu thong tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Vui lòng nhập GitHub repository URL.", "Thiếu thông tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        var repository = repositoriesComboBox.SelectedItem as SavedRepository;
-        repository = repository is not null
-            && repository.ProjectFolder.Equals(projectFolder, StringComparison.OrdinalIgnoreCase)
-                ? repository
-                : appSettings.Repositories.FirstOrDefault(item =>
-                    item.ProjectFolder.Equals(projectFolder, StringComparison.OrdinalIgnoreCase)
-                    || item.RepoUrl.Equals(repoUrl, StringComparison.OrdinalIgnoreCase));
-
-        if (repository is null)
+        SavedRepository? repository;
+        if (isAddingNew || string.IsNullOrWhiteSpace(SelectedRepositoryId))
         {
+            var duplicate = FindDuplicateRepository(projectFolder, repoUrl, null);
+            if (duplicate is not null)
+            {
+                MessageBox.Show(this, "Repo này đã tồn tại trong danh sách. App sẽ chọn repo đó để bạn sửa.", "Repo đã tồn tại", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                RefreshRepositoryCombo(duplicate.Id);
+                return;
+            }
+
             repository = new SavedRepository();
             appSettings.Repositories.Add(repository);
         }
+        else
+        {
+            repository = appSettings.Repositories.FirstOrDefault(item =>
+                item.Id.Equals(SelectedRepositoryId, StringComparison.OrdinalIgnoreCase));
+            if (repository is null)
+            {
+                MessageBox.Show(this, "Repo đang chọn không còn tồn tại. Bấm New để thêm repo mới.", "Không tìm thấy repo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                RefreshRepositoryCombo(appSettings.LastRepositoryId);
+                return;
+            }
 
+            var duplicate = FindDuplicateRepository(projectFolder, repoUrl, repository.Id);
+            if (duplicate is not null)
+            {
+                MessageBox.Show(this, $"Folder hoặc URL này đã thuộc repo khác:\n\n{duplicate}", "Trùng repo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+        }
+
+        UpdateRepository(repository, projectFolder, repoUrl);
+
+        isAddingNew = false;
+        SelectedRepositoryId = repository.Id;
+        appSettings.LastRepositoryId = repository.Id;
+        appSettingsService.Save(appSettings);
+        RefreshRepositoryCombo(repository.Id);
+        MessageBox.Show(this, "Đã lưu repo.", "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+    private SavedRepository? FindDuplicateRepository(string projectFolder, string repoUrl, string? ignoredRepositoryId)
+    {
+        return appSettings.Repositories.FirstOrDefault(repository =>
+            !repository.Id.Equals(ignoredRepositoryId, StringComparison.OrdinalIgnoreCase)
+            && (NormalizeFolderPath(repository.ProjectFolder).Equals(projectFolder, StringComparison.OrdinalIgnoreCase)
+                || repository.RepoUrl.Trim().Equals(repoUrl, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private void UpdateRepository(SavedRepository repository, string projectFolder, string repoUrl)
+    {
         repository.Name = GetRepositoryDisplayName(projectFolder, repoUrl);
         repository.ProjectFolder = projectFolder;
         repository.RepoUrl = repoUrl;
         repository.Branch = string.IsNullOrWhiteSpace(branchTextBox.Text) ? "main" : branchTextBox.Text.Trim();
         repository.CommitMessage = commitMessageTextBox.Text.Trim();
         repository.CloneFolderName = cloneFolderNameTextBox.Text.Trim();
-
-        SelectedRepositoryId = repository.Id;
-        appSettings.LastRepositoryId = repository.Id;
-        appSettingsService.Save(appSettings);
-        RefreshRepositoryCombo(repository.Id);
-        MessageBox.Show(this, "Da luu repo.", "Thanh cong", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    private static string NormalizeFolderPath(string folder)
+    {
+        folder = folder.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return Path.GetFullPath(folder);
+        }
+        catch
+        {
+            return folder;
+        }
+    }
     private void DeleteSelectedRepository()
     {
         if (repositoriesComboBox.SelectedItem is not SavedRepository repository)
@@ -276,6 +347,7 @@ public sealed class SettingsForm : Form
         commitMessageTextBox.Clear();
         cloneFolderNameTextBox.Clear();
         SelectedRepositoryId = null;
+        isAddingNew = true;
     }
 
     private static string GetRepositoryDisplayName(string projectFolder, string repoUrl)
@@ -290,3 +362,7 @@ public sealed class SettingsForm : Form
         return string.IsNullOrWhiteSpace(repoName) ? "Repository" : repoName.Replace(".git", string.Empty, StringComparison.OrdinalIgnoreCase);
     }
 }
+
+
+
+

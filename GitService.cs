@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 
 namespace GitHubSimpleUploader;
@@ -63,7 +63,7 @@ public sealed class GitService
                 return new GitCommandResult
                 {
                     ExitCode = -1,
-                    StandardError = "Không thể khởi động Git."
+                    StandardError = "KhÃ´ng thá»ƒ khá»Ÿi Ä‘á»™ng Git."
                 };
             }
 
@@ -71,6 +71,7 @@ public sealed class GitService
             process.BeginErrorReadLine();
 
             await process.WaitForExitAsync(cancellationToken);
+            process.WaitForExit();
 
             return new GitCommandResult
             {
@@ -84,7 +85,7 @@ public sealed class GitService
             return new GitCommandResult
             {
                 ExitCode = -1,
-                StandardError = "Không tìm thấy Git. Vui lòng cài Git for Windows và mở lại ứng dụng."
+                StandardError = "KhÃ´ng tÃ¬m tháº¥y Git. Vui lÃ²ng cÃ i Git for Windows vÃ  má»Ÿ láº¡i á»©ng dá»¥ng."
             };
         }
         catch (OperationCanceledException)
@@ -92,7 +93,7 @@ public sealed class GitService
             return new GitCommandResult
             {
                 ExitCode = -1,
-                StandardError = "Lệnh Git đã bị hủy."
+                StandardError = "Lá»‡nh Git Ä‘Ã£ bá»‹ há»§y."
             };
         }
         catch (Exception ex)
@@ -100,7 +101,7 @@ public sealed class GitService
             return new GitCommandResult
             {
                 ExitCode = -1,
-                StandardError = $"Có lỗi khi chạy Git: {ex.Message}"
+                StandardError = $"CÃ³ lá»—i khi cháº¡y Git: {ex.Message}"
             };
         }
     }
@@ -143,3 +144,4 @@ public sealed class GitService
         return quoted.ToString();
     }
 }
+

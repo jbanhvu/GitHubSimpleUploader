@@ -1,4 +1,4 @@
-namespace GitHubSimpleUploader;
+﻿namespace GitHubSimpleUploader;
 
 public sealed class MainForm : Form
 {
@@ -434,17 +434,16 @@ public sealed class MainForm : Form
 
     private async Task InitOrLinkRepoAsync()
     {
-        var projectFolder = RequireProjectFolder();
+        var projectFolder = RequireProjectFolderForInit();
         var repoUrl = RequireRepoUrl();
         var branch = GetBranch();
 
+        AppendLog($"Project folder: {projectFolder}");
+        AppendLog($"Repository URL: {repoUrl}");
+
         EnsureBasicGitIgnoreRules(projectFolder);
 
-        if (!Directory.Exists(Path.Combine(projectFolder, ".git")))
-        {
-            await EnsureSuccessAsync(projectFolder, "init");
-            await EnsureSuccessAsync(projectFolder, $"branch -M {GitService.QuoteArgument(branch)}");
-        }
+        await EnsureGitRepositoryInitializedAsync(projectFolder, branch);
 
         var remoteResult = await RunGitAsync(projectFolder, "remote get-url origin", false);
         var quotedRepoUrl = GitService.QuoteArgument(repoUrl);
@@ -458,9 +457,45 @@ public sealed class MainForm : Form
             await EnsureSuccessAsync(projectFolder, $"remote add origin {quotedRepoUrl}");
         }
 
+        await VerifyRemoteRepositoryAsync(projectFolder);
         await RunGitAsync(projectFolder, "status --untracked-files=normal");
     }
 
+    private async Task EnsureGitRepositoryInitializedAsync(string projectFolder, string branch)
+    {
+        var insideRepoResult = await RunGitAsync(projectFolder, "rev-parse --is-inside-work-tree", false, logOutput: false);
+        if (!insideRepoResult.IsSuccess || !insideRepoResult.StandardOutput.Trim().Equals("true", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Directory.Exists(Path.Combine(projectFolder, ".git")))
+            {
+                AppendLog("Phát hiện thư mục .git không hợp lệ. Đang khởi tạo lại Git metadata...");
+            }
+
+            await EnsureSuccessAsync(projectFolder, "init");
+            insideRepoResult = await RunGitAsync(projectFolder, "rev-parse --is-inside-work-tree", false, logOutput: false);
+        }
+
+        if (!insideRepoResult.IsSuccess || !insideRepoResult.StandardOutput.Trim().Equals("true", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Không thể khởi tạo Git repo trong thư mục này.\n\n"
+                + $"Thư mục: {projectFolder}\n\n"
+                + "Hãy kiểm tra lại Project folder trong Settings, rồi bấm Init / Link Repo lại.");
+        }
+
+        await EnsureSuccessAsync(projectFolder, $"branch -M {GitService.QuoteArgument(branch)}");
+    }
+    private async Task VerifyRemoteRepositoryAsync(string projectFolder)
+    {
+        var result = await RunGitAsync(projectFolder, "ls-remote --heads origin", false, logOutput: false);
+        if (result.IsSuccess)
+        {
+            AppendLog("Đã kiểm tra remote origin thành công.");
+            return;
+        }
+
+        throw new InvalidOperationException(BuildGitErrorMessage("ls-remote --heads origin", result));
+    }
     private async Task UploadTodayAsync()
     {
         var projectFolder = RequireProjectFolder();
@@ -533,17 +568,7 @@ public sealed class MainForm : Form
 
         await EnsureSuccessAsync(projectFolder, $"commit -q -m {GitService.QuoteArgument(GetCommitMessage())}");
 
-        var pushResult = await RunGitAsync(projectFolder, $"push origin {GitService.QuoteArgument(branch)}", false);
-        if (!pushResult.IsSuccess)
-        {
-            if (IsAuthenticationError(pushResult))
-            {
-                throw new InvalidOperationException("Git khong tim thay credential hop le cho repository nay. Hay dang nhap GitHub bang Git Credential Manager/GitHub Desktop, hoac kiem tra remote URL co dung voi repo da tung push khong.");
-            }
-
-            AppendLog("Push chưa thành công. Thử set upstream rồi push lại...");
-            await EnsureSuccessAsync(projectFolder, $"push -u origin {GitService.QuoteArgument(branch)}");
-        }
+        await PushBranchAsync(projectFolder, branch);
     }
 
     private async Task CloneProjectAsync()
@@ -591,9 +616,29 @@ public sealed class MainForm : Form
         await RunGitAsync(projectFolder, "status --untracked-files=normal");
     }
 
+    private string RequireProjectFolderForInit()
+    {
+        var folder = projectFolderTextBox.Text.Trim().Trim('\"');
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            throw new InvalidOperationException("Vui long nhap hoac chon thu muc project local.");
+        }
+
+        try
+        {
+            folder = Path.GetFullPath(folder);
+            Directory.CreateDirectory(folder);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Khong the tao thu muc project local: {ex.Message}");
+        }
+
+        return folder;
+    }
     private string RequireProjectFolder()
     {
-        var folder = projectFolderTextBox.Text.Trim();
+        var folder = projectFolderTextBox.Text.Trim().Trim('\"');
         if (string.IsNullOrWhiteSpace(folder))
         {
             throw new InvalidOperationException("Vui lòng chọn thư mục project local.");
@@ -615,9 +660,72 @@ public sealed class MainForm : Form
             throw new InvalidOperationException("Vui lòng nhập GitHub repository URL.");
         }
 
-        return repoUrl;
+        var normalizedUrl = NormalizeGitHubRepoUrl(repoUrl);
+        if (string.IsNullOrWhiteSpace(normalizedUrl))
+        {
+            throw new InvalidOperationException(
+                "GitHub repository URL không hợp lệ.\n\n"
+                + "Ví dụ đúng:\n"
+                + "https://github.com/username/repository.git\n"
+                + "https://github.com/username/repository\n"
+                + "git@github.com:username/repository.git");
+        }
+
+        if (!normalizedUrl.Equals(repoUrl, StringComparison.Ordinal))
+        {
+            AppendLog($"Đã chuẩn hóa GitHub URL: {normalizedUrl}");
+            repoUrlTextBox.Text = normalizedUrl;
+        }
+
+        return normalizedUrl;
     }
 
+    private static string? NormalizeGitHubRepoUrl(string repoUrl)
+    {
+        repoUrl = repoUrl.Trim();
+
+        if (repoUrl.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase))
+        {
+            var path = repoUrl["git@github.com:".Length..].Trim('/');
+            var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+            {
+                return null;
+            }
+
+            var owner = parts[0];
+            var repo = parts[1].EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                ? parts[1]
+                : parts[1] + ".git";
+            return $"git@github.com:{owner}/{repo}";
+        }
+
+        if (!Uri.TryCreate(repoUrl, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        if (!uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var urlParts = uri.AbsolutePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (urlParts.Length < 2 || urlParts[0].Equals("new", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var repoName = urlParts[1].EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+            ? urlParts[1][..^4]
+            : urlParts[1];
+        if (string.IsNullOrWhiteSpace(urlParts[0]) || string.IsNullOrWhiteSpace(repoName))
+        {
+            return null;
+        }
+
+        return $"https://github.com/{urlParts[0]}/{repoName}.git";
+    }
     private string GetBranch()
     {
         var branch = branchTextBox.Text.Trim();
@@ -675,10 +783,32 @@ public sealed class MainForm : Form
         var result = await RunGitAsync(workingDirectory, arguments, logOutput: logOutput);
         if (!result.IsSuccess)
         {
-            throw new InvalidOperationException("Lệnh Git chạy không thành công. Vui lòng xem log để biết chi tiết.");
+            throw new InvalidOperationException(BuildGitErrorMessage(arguments, result));
         }
     }
 
+    private static string BuildGitErrorMessage(string arguments, GitCommandResult result)
+    {
+        var details = string.Join(
+            Environment.NewLine,
+            new[] { result.StandardError.Trim(), result.StandardOutput.Trim() }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        if (string.IsNullOrWhiteSpace(details))
+        {
+            details = "Git không trả về nội dung lỗi.";
+        }
+
+        return "Lệnh Git chạy không thành công."
+            + Environment.NewLine + Environment.NewLine
+            + $"Lệnh: git {arguments}"
+            + Environment.NewLine
+            + $"Exit code: {result.ExitCode}"
+            + Environment.NewLine + Environment.NewLine
+            + "Chi tiết lỗi:"
+            + Environment.NewLine
+            + details;
+    }
     private void EnsureBasicGitIgnoreRules(string projectFolder)
     {
         var gitIgnorePath = Path.Combine(projectFolder, ".gitignore");
@@ -863,18 +993,38 @@ public sealed class MainForm : Form
     private async Task PushBranchAsync(string projectFolder, string branch)
     {
         var pushResult = await RunGitAsync(projectFolder, $"push origin {GitService.QuoteArgument(branch)}", false);
-        if (!pushResult.IsSuccess)
+        if (pushResult.IsSuccess)
         {
-            if (IsAuthenticationError(pushResult))
+            return;
+        }
+
+        if (IsAuthenticationError(pushResult))
+        {
+            throw new InvalidOperationException("Git không tìm thấy credential hợp lệ cho repository này. Hãy đăng nhập GitHub bằng Git Credential Manager/GitHub Desktop, hoặc kiểm tra remote URL có đúng với repo đã từng push không.");
+        }
+
+        if (IsNonFastForwardPushError(pushResult))
+        {
+            AppendLog("Remote đang có commit mới. App sẽ pull về trước rồi push lại...");
+
+            var pullResult = await RunGitAsync(projectFolder, $"pull --rebase --autostash origin {GitService.QuoteArgument(branch)}", false);
+            if (!pullResult.IsSuccess && IsUnrelatedHistoriesError(pullResult))
             {
-                throw new InvalidOperationException("Git khong tim thay credential hop le cho repository nay. Hay dang nhap GitHub bang Git Credential Manager/GitHub Desktop, hoac kiem tra remote URL co dung voi repo da tung push khong.");
+                AppendLog("Remote và local chưa có lịch sử chung. Thử merge với --allow-unrelated-histories...");
+                await EnsureSuccessAsync(projectFolder, $"pull --no-rebase --allow-unrelated-histories origin {GitService.QuoteArgument(branch)}");
+            }
+            else if (!pullResult.IsSuccess)
+            {
+                throw new InvalidOperationException(BuildGitErrorMessage($"pull --rebase --autostash origin {branch}", pullResult));
             }
 
-            AppendLog("Push chua thanh cong. Thu set upstream roi push lai...");
-            await EnsureSuccessAsync(projectFolder, $"push -u origin {GitService.QuoteArgument(branch)}");
+            await EnsureSuccessAsync(projectFolder, $"push origin {GitService.QuoteArgument(branch)}");
+            return;
         }
-    }
 
+        AppendLog("Push chưa thành công. Thử set upstream rồi push lại...");
+        await EnsureSuccessAsync(projectFolder, $"push -u origin {GitService.QuoteArgument(branch)}");
+    }
     private void LogSkippedSecretFiles(IReadOnlyCollection<string> secretPaths)
     {
         if (secretPaths.Count == 0)
@@ -962,6 +1112,21 @@ public sealed class MainForm : Form
             || fileName.EndsWith(".key", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsNonFastForwardPushError(GitCommandResult result)
+    {
+        var text = $"{result.StandardOutput}\n{result.StandardError}";
+        return text.Contains("fetch first", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Updates were rejected because the remote contains work", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("rejected", StringComparison.OrdinalIgnoreCase) && text.Contains("failed to push", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnrelatedHistoriesError(GitCommandResult result)
+    {
+        var text = $"{result.StandardOutput}\n{result.StandardError}";
+        return text.Contains("refusing to merge unrelated histories", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("unrelated histories", StringComparison.OrdinalIgnoreCase);
+    }
     private static bool IsAuthenticationError(GitCommandResult result)
     {
         var text = $"{result.StandardOutput}\n{result.StandardError}";
@@ -998,3 +1163,19 @@ public sealed class MainForm : Form
         logTextBox.ScrollToCaret();
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
